@@ -267,6 +267,10 @@ async function showDiary() {
     await loadEntries();
 }
 
+function esc(v) {
+    return String(v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
 async function loadEntries() {
     const list = document.getElementById('entryList');
     if (!list) return;
@@ -276,9 +280,13 @@ async function loadEntries() {
             list.innerHTML = '<li><i>Записів ще немає</i></li>';
             return;
         }
-        list.innerHTML = entries.map(e => `
+        const titles = await Promise.all(entries.map(async e => {
+            try { return JSON.parse(await decryptData(diaryKey, e.iv, e.ciphertext)).title || '(без заголовка)'; }
+            catch { return '🔒 не вдалося розшифрувати'; }
+        }));
+        list.innerHTML = entries.map((e, i) => `
           <li>
-            <span>${e.created_at}</span>
+            <span><b>${esc(titles[i])}</b><br><small>${esc(e.created_at)}</small></span>
             <div>
               <button onclick="editEntry(${e.id})">✏️</button>
               <button class="danger" onclick="deleteEntry(${e.id})">🗑️</button>
@@ -375,14 +383,14 @@ async function showAdmin() {
     const users = await api('/api/admin/users');
     document.getElementById('userList').innerHTML = users.map(u => `
       <li>
-        <span>${u.username} <small>(${u.role})</small></span>
+        <span>${esc(u.username)} <small>(${esc(u.role)})</small></span>
         <button class="danger" onclick="deleteUser(${u.id})">🗑️</button>
       </li>`).join('');
 
     const entries = await api('/api/admin/entries');
     document.getElementById('allEntries').innerHTML = entries.map(e => `
       <li>
-        <span>#${e.id} · ${e.username} · ${e.created_at}</span>
+        <span>#${e.id} · ${esc(e.username)} · ${esc(e.created_at)}</span>
         <button class="danger" onclick="deleteAdminEntry(${e.id})">🗑️</button>
       </li>`).join('');
 }
