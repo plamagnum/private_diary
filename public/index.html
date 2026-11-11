@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Приватний щоденник</title>
+<link href="https://cdn.quilljs.com/1.3.6/quill.snow.css" rel="stylesheet">
+<script src="https://cdn.quilljs.com/1.3.6/quill.js"></script>
+<style>
+    :root {
+        --bg: #ffffff; --text: #1a1a1a; --card: #f5f5f5;
+        --border: #dddddd; --primary: #007bff; --danger: #dc3545;
+    }
+    [data-theme="dark"] {
+        --bg: #1a1a2e; --text: #e0e0e0; --card: #16213e;
+        --border: #0f3460; --primary: #e94560; --danger: #ff6b6b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+        font-family: 'Segoe UI', sans-serif;
+        background: var(--bg); color: var(--text);
+        min-height: 100vh; padding: 20px;
+        display: flex; justify-content: center; align-items: flex-start;
+    }
+    .app { width: 100%; max-width: 800px; }
+    .hidden { display: none !important; }
+    button, input, textarea {
+        padding: 10px; border: 1px solid var(--border); border-radius: 6px;
+        background: var(--card); color: var(--text); font-size: 1rem;
+    }
+    button { cursor: pointer; background: var(--primary); color: #fff; border: none; }
+    button.danger { background: var(--danger); }
+    .card {
+        background: var(--card); border: 1px solid var(--border);
+        border-radius: 8px; padding: 20px; margin-bottom: 20px;
+    }
+    .flex { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .mt-1 { margin-top: 10px; }
+    .editor { height: 300px; background: var(--bg); }
+    .entry-list { list-style: none; }
+    .entry-list li {
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 10px; border-bottom: 1px solid var(--border);
+    }
+    @media (max-width: 600px) { .flex { flex-direction: column; align-items: stretch; } }
+</style>
+</head>
+<body>
+<div class="app" id="app"></div>
+
+<script>
+// ============================================================
+//  Глобальний стан
+// ============================================================
+let currentUser = null;
+let diaryKey    = null;
+let quill       = null;
+
+// ============================================================
+//  Тема
+// ============================================================
+document.documentElement.setAttribute(
+    'data-theme', localStorage.getItem('theme') || 'light'
+);
+function toggleTheme() {
+    const t = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', t);
+    localStorage.setItem('theme', t);
+}
+
+// ============================================================
+//  HTTP-обгортка
+// ============================================================
+async function api(url, method = 'GET', body = null) {
+    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+    if (body) opts.body = JSON.stringify(body);
+    const res = await fetch(url, opts);
+    let data;
+    try { data = await res.json(); } catch { data = {}; }
+    if (!res.ok) throw new Error(data.error || 'Помилка сервера');
+    return data;
+}
+
+// ============================================================
+//  Криптографія (Web Crypto API)
+// ============================================================
+async function deriveKey(password, salt) {
+    const enc = new TextEncoder();
+    const mat = await crypto.subtle.importKey(
+        'raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']
+    );
+    return crypto.subtle.deriveKey(
+        { name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' },
+        mat,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt', 'decrypt']
+    );
+}
+
+// Шифрування з випадковим IV (для реальних записів)
+async function encryptData(key, plaintext) {
+    const iv  = crypto.getRandomValues(new Uint8Array(12));
+    const enc = new TextEncoder();
+    const encBuf = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv }, key, enc.encode(plaintext)
+    );
+    const bytes = new Uint8Array(encBuf);
+    return {
+        iv:         btoa(String.fromCharCode(...iv)),
+        ciphertext: btoa(String.fromCharCode(...bytes)),
+        tag:        ''
+    };
+}
+
+// Розшифрування (ciphertext уже містить GCM-тег у кінці)
+async function decryptData(key, ivB64, ciphertextB64) {
+    const iv  = Uint8Array.from(atob(ivB64), c => c.charCodeAt(0));
+    const ct  = Uint8Array.from(atob(ciphertextB64), c => c.charCodeAt(0));
+    const dec = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+    return new TextDecoder().decode(dec);
+}
+
+// Детермінована "верифікація": фіксований IV=0 + фіксований plaintext.
+// Це безпечно для перевірки ключа, бо використовується лише з одним
+// фіксованим рядком (DIARY_VERIFICATION) і жодного разу не шифрує
+// реальні записи.
+async function computeVerification(key) {
+    const iv  = new Uint8Array(12);   // всі нулі
+    const enc = new TextEncoder();
+    const buf = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv }, key, enc.encode('DIARY_VERIFICATION')
+    );
+    return btoa(String.fromCharCode(...new Uint8Array(buf)));
+}
+
+// ============================================================
+//  Рендеринг екранів
+// ============================================================
+const app = document.getElementById('app');
+const render = html => { app.innerHTML = html; };
+
+function showLogin() {
+    render(`
+      <div class="card">
+        <div class="flex"><h2>Увійти</h2><button onclick="toggleTheme()">🌓</button></div>
+        <input id="loginUser" placeholder="Логін" class="mt-1"><br>
+        <input id="loginPass" type="password" placeholder="Пароль" class="mt-1"><br>
+        <div class="flex mt-1">
+          <button onclick="login()">Увійти</button>
+          <button onclick="showRegister()">Зареєструватись</button>
+        </div>
+      </div>`);
+}
+
+function showRegister() {
+    render(`
+      <div class="card">
+        <h2>Реєстрація</h2>
+        <input id="regUser" placeholder="Логін (≥3)" class="mt-1"><br>
+        <input id="regPass" type="password" placeholder="Пароль (≥6)" class="mt-1"><br>
+        <div class="flex mt-1">
+          <button onclick="register()">Зареєструватись</button>
+          <button onclick="showLogin()">Назад</button>
+        </div>
+      </div>`);
+}
+
+async function login() {
+    const username = document.getElementById('loginUser').value.trim();
+    const password = document.getElementById('loginPass').value;
+    try {
+        currentUser = await api('/api/auth/login', 'POST', { username, password });
+        await loadUserData();
+    } catch (e) { alert(e.message); }
+}
+
+async function register() {
+    const username = document.getElementById('regUser').value.trim();
+    const password = document.getElementById('regPass').value;
+    try {
+        await api('/api/auth/register', 'POST', { username, password });
+        alert('Реєстрація успішна! Тепер увійдіть.');
+        showLogin();
+    } catch (e) { alert(e.message); }
+}
+
+async function logout() {
+    try { await api('/api/auth/logout', 'POST'); } catch {}
+    currentUser = null; diaryKey = null;
+    showLogin();
+}
+
+async function loadUserData() {
+    try {
+        currentUser = await api('/api/auth/me');
+        if (currentUser.diary_salt) showUnlockDiary();
+        else                        showSetDiaryKey();
+    } catch { showLogin(); }
+}
+
+function showSetDiaryKey() {
+    render(`
+      <div class="card">
+        <h2>Створіть ключ щоденника</h2>
+        <p>Цим ключем шифруватимуться всі записи. Запам'ятайте його — відновити неможливо!</p>
+        <input id="diaryPass" type="password" placeholder="Ключ (мін. 8 символів)" class="mt-1"><br>
+        <div class="flex mt-1">
+          <button onclick="setDiaryKey()">Встановити</button>
+          <button onclick="logout()">Вийти</button>
+        </div>
+      </div>`);
+}
+
+async function setDiaryKey() {
+    const pass = document.getElementById('diaryPass').value;
+    if (pass.length < 8) return alert('Мінімум 8 символів');
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    diaryKey  = await deriveKey(pass, salt);
+    const saltB64 = btoa(String.fromCharCode(...salt));
+    const verification = await computeVerification(diaryKey);
+    await api('/api/diary/set-key', 'POST', { salt: saltB64, verification });
+    await api('/api/diary/verify-key', 'POST', { verification });
+    alert('Ключ встановлено!');
+    showDiary();
+}
+
+function showUnlockDiary() {
+    render(`
+      <div class="card">
+        <h2>Введіть ключ щоденника</h2>
+        <input id="unlockPass" type="password" placeholder="Ключ" class="mt-1"><br>
+        <div class="flex mt-1">
+          <button onclick="unlockDiary()">Розблокувати</button>
+          <button onclick="logout()">Вийти</button>
+        </div>
+      </div>`);
+}
+
+async function unlockDiary() {
+    const pass = document.getElementById('unlockPass').value;
+    if (!currentUser.diary_salt) return;
+    const salt = Uint8Array.from(atob(currentUser.diary_salt), c => c.charCodeAt(0));
+    diaryKey = await deriveKey(pass, salt);
+    const verification = await computeVerification(diaryKey);
+    try {
+        await api('/api/diary/verify-key', 'POST', { verification });
+        showDiary();
+    } catch {
+        alert('Невірний ключ');
+    }
+}
+
+async function showDiary() {
+    render(`
+      <div class="card">
+        <div class="flex">
+          <h2>Щоденник</h2>
+          <button onclick="toggleTheme()">🌓</button>
+          <button onclick="logout()">Вийти</button>
+          ${currentUser.role === 'admin'
+              ? '<button onclick="showAdmin()">Адмінка</button>' : ''}
+        </div>
+        <button onclick="showNewEntry()" class="mt-1">+ Новий запис</button>
+        <ul id="entryList" class="entry-list mt-1"></ul>
+      </div>`);
+    await loadEntries();
+}
+
+async function loadEntries() {
+    const list = document.getElementById('entryList');
+    if (!list) return;
+    try {
+        const entries = await api('/api/diary/entries');
+        if (!entries.length) {
+            list.innerHTML = '<li><i>Записів ще немає</i></li>';
+            return;
+        }
+        list.innerHTML = entries.map(e => `
+          <li>
+            <span>${e.created_at}</span>
+            <div>
+              <button onclick="editEntry(${e.id})">✏️</button>
+              <button class="danger" onclick="deleteEntry(${e.id})">🗑️</button>
+            </div>
+          </li>`).join('');
+    } catch (e) { alert(e.message); }
+}
+
+function showNewEntry() {
+    render(`
+      <div class="card">
+        <h2>Новий запис</h2>
+        <div id="editor" class="editor"></div>
+        <div class="flex mt-1">
+          <button onclick="saveEntry()">Зберегти</button>
+          <button onclick="showDiary()">Скасувати</button>
+        </div>
+      </div>`);
+    initQuill();
+}
+
+async function editEntry(id) {
+    const entries = await api('/api/diary/entries');
+    const entry   = entries.find(e => e.id == id);
+    if (!entry) return;
+    let plain;
+    try { plain = await decryptData(diaryKey, entry.iv, entry.ciphertext); }
+    catch { return alert('Помилка розшифрування'); }
+    const data = JSON.parse(plain);
+    render(`
+      <div class="card">
+        <h2>Редагування</h2>
+        <div id="editor" class="editor"></div>
+        <div class="flex mt-1">
+          <button onclick="updateEntry(${id})">Оновити</button>
+          <button onclick="showDiary()">Скасувати</button>
+        </div>
+      </div>`);
+    initQuill();
+    quill.root.innerHTML = data.content;
+}
+
+async function saveEntry() {
+    const content = quill.root.innerHTML;
+    const title   = quill.getText().trim().substring(0, 50);
+    const { iv, ciphertext, tag } = await encryptData(diaryKey, JSON.stringify({ title, content }));
+    await api('/api/diary/entries', 'POST', { iv, ciphertext, tag });
+    showDiary();
+}
+
+async function updateEntry(id) {
+    const content = quill.root.innerHTML;
+    const title   = quill.getText().trim().substring(0, 50);
+    const { iv, ciphertext, tag } = await encryptData(diaryKey, JSON.stringify({ title, content }));
+    await api(`/api/diary/entries/${id}`, 'PUT', { iv, ciphertext, tag });
+    showDiary();
+}
+
+async function deleteEntry(id) {
+    if (!confirm('Видалити запис?')) return;
+    await api(`/api/diary/entries/${id}`, 'DELETE');
+    showDiary();
+}
+
+function initQuill() {
+    quill = new Quill('#editor', {
+        theme: 'snow',
+        modules: {
+            toolbar: [
+                ['bold', 'italic', 'underline', 'strike'],
+                [{ list: 'ordered' }, { list: 'bullet' }],
+                ['clean']
+            ]
+        }
+    });
+}
+
+// ============================================================
+//  Адмін-панель
+// ============================================================
+async function showAdmin() {
+    render(`
+      <div class="card">
+        <div class="flex">
+          <h2>Адміністратор</h2>
+          <button onclick="showDiary()">Назад</button>
+        </div>
+        <h3 class="mt-1">Користувачі</h3>
+        <ul id="userList" class="entry-list"></ul>
+        <h3 class="mt-1">Усі записи (зашифровані)</h3>
+        <ul id="allEntries" class="entry-list"></ul>
+      </div>`);
+
+    const users = await api('/api/admin/users');
+    document.getElementById('userList').innerHTML = users.map(u => `
+      <li>
+        <span>${u.username} <small>(${u.role})</small></span>
+        <button class="danger" onclick="deleteUser(${u.id})">🗑️</button>
+      </li>`).join('');
+
+    const entries = await api('/api/admin/entries');
+    document.getElementById('allEntries').innerHTML = entries.map(e => `
+      <li>
+        <span>#${e.id} · ${e.username} · ${e.created_at}</span>
+        <button class="danger" onclick="deleteAdminEntry(${e.id})">🗑️</button>
+      </li>`).join('');
+}
+
+async function deleteUser(id) {
+    if (!confirm('Видалити користувача?')) return;
+    await api(`/api/admin/users/${id}`, 'DELETE');
+    showAdmin();
+}
+
+async function deleteAdminEntry(id) {
+    if (!confirm('Видалити запис?')) return;
+    await api(`/api/admin/entries/${id}`, 'DELETE');
+    showAdmin();
+}
+
+// ============================================================
+//  Старт
+// ============================================================
+(async () => {
+    try {
+        currentUser = await api('/api/auth/me');
+        if (currentUser) await loadUserData();
+        else             showLogin();
+    } catch {
+        showLogin();
+    }
+})();
+</script>
+</body>
+</html>
