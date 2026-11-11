@@ -19,9 +19,17 @@ CREATE TABLE IF NOT EXISTS entries (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- Адміністратор за замовчуванням.
--- Пароль 'admin123' встановлюється скриптом setup.sh після старту БД
--- (реальний bcrypt-хеш генерується через PHP).
+CREATE TABLE IF NOT EXISTS login_attempts (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    ip VARCHAR(45) NOT NULL,
+    username VARCHAR(50) NOT NULL,
+    attempted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX (ip, attempted_at),
+    INDEX (username, attempted_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Адміністратор: заглушка замінюється bcrypt-хешем пароля з ADMIN_PASSWORD
+-- при першому підключенні PHP до БД (див. php/db.php).
 INSERT INTO users (username, password_hash, role)
 VALUES ('admin', 'placeholder', 'admin')
 ON DUPLICATE KEY UPDATE username=username;

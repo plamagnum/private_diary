@@ -1,20 +1,18 @@
-version: '3.8'
-
 services:
   db:
     image: mysql:8.0
     container_name: diary_db
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set in .env}
       MYSQL_DATABASE: diary
-      MYSQL_USER: diary_user
-      MYSQL_PASSWORD: diary_pass
+      MYSQL_USER: ${DB_USER:-diary_user}
+      MYSQL_PASSWORD: ${DB_PASS:?set in .env}
     volumes:
       - db_data:/var/lib/mysql
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
-      - "3307:3306"          # не конфліктує з локальним MySQL
+      - "127.0.0.1:3307:3306"   # лише локально
 
   php:
     build: ./php
@@ -28,8 +26,9 @@ services:
     environment:
       DB_HOST: db
       DB_NAME: diary
-      DB_USER: diary_user
-      DB_PASS: diary_pass
+      DB_USER: ${DB_USER:-diary_user}
+      DB_PASS: ${DB_PASS:?set in .env}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set in .env}
 
   nginx:
     image: nginx:alpine
@@ -50,10 +49,8 @@ services:
     environment:
       PMA_HOST: db
       PMA_PORT: 3306
-      PMA_USER: root
-      PMA_PASSWORD: rootpass
     ports:
-      - "8086:80"
+      - "127.0.0.1:8086:80"
     depends_on:
       - db
 
