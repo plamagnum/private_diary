@@ -3,7 +3,8 @@
 // Використовує $method, $path, $user з auth.php
 
 function requireDiaryUnlocked() {
-    if (empty($_SESSION['diary_unlocked'])) {
+    global $user;
+    if (($_SESSION['diary_unlocked'] ?? null) !== (int)$user['id']) {
         http_response_code(403);
         echo json_encode(['error' => 'Спочатку введіть ключ щоденника']);
         exit;
@@ -28,12 +29,12 @@ if ($method === 'GET' && $path === '/api/diary/entries') {
 // --- Створити запис ---
 if ($method === 'POST' && $path === '/api/diary/entries') {
     requireDiaryUnlocked();
-    $data = json_decode(file_get_contents('php://input'), true);
+    $data = readJson();
     $iv         = $data['iv']         ?? '';
     $ciphertext = $data['ciphertext'] ?? '';
     $tag        = $data['tag']        ?? '';
 
-    if (empty($iv) || empty($ciphertext)) {
+    if (!is_string($iv) || !is_string($ciphertext) || !is_string($tag) || $iv === '' || $ciphertext === '' || strlen($iv) > 64 || strlen($tag) > 64) {
         http_response_code(400);
         echo json_encode(['error' => 'Необхідні iv і ciphertext']);
         exit;
@@ -50,7 +51,13 @@ if ($method === 'POST' && $path === '/api/diary/entries') {
 if ($method === 'PUT' && preg_match('#^/api/diary/entries/(\d+)$#', $path, $m)) {
     requireDiaryUnlocked();
     $entryId = (int)$m[1];
-    $data    = json_decode(file_get_contents('php://input'), true);
+    $data    = readJson();
+    $iv         = $data['iv']         ?? '';
+    $ciphertext = $data['ciphertext'] ?? '';
+    $tag        = $data['tag']        ?? '';
+    if (!is_string($iv) || !is_string($ciphertext) || !is_string($tag) || $iv === '' || $ciphertext === '' || strlen($iv) > 64 || strlen($tag) > 64) {
+        jsonError(400, 'Необхідні iv і ciphertext');
+    }
 
     $pdo = getDB();
     $stmt = $pdo->prepare("SELECT id FROM entries WHERE id = ? AND user_id = ?");
@@ -62,7 +69,7 @@ if ($method === 'PUT' && preg_match('#^/api/diary/entries/(\d+)$#', $path, $m)) 
     }
 
     $stmt = $pdo->prepare("UPDATE entries SET iv = ?, ciphertext = ?, tag = ? WHERE id = ?");
-    $stmt->execute([$data['iv'], $data['ciphertext'], $data['tag'] ?? '', $entryId]);
+    $stmt->execute([$iv, $ciphertext, $tag, $entryId]);
     echo json_encode(['success' => true]);
     exit;
 }

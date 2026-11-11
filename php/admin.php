@@ -18,6 +18,15 @@ if ($method === 'DELETE' && preg_match('#^/api/admin/users/(\d+)$#', $path, $m))
         exit;
     }
     $pdo = getDB();
+    $stmt = $pdo->prepare("SELECT role FROM users WHERE id = ?");
+    $stmt->execute([$userId]);
+    $target = $stmt->fetchColumn();
+    if ($target === false) {
+        jsonError(404, 'Користувача не знайдено');
+    }
+    if ($target === 'admin') {
+        jsonError(403, 'Не можна видалити адміністратора');
+    }
     $stmt = $pdo->prepare("DELETE FROM users WHERE id = ?");
     $stmt->execute([$userId]);
     echo json_encode(['success' => true]);
