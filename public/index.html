@@ -43,6 +43,10 @@
         padding: 10px; border-bottom: 1px solid var(--border);
     }
     @media (max-width: 600px) { .flex { flex-direction: column; align-items: stretch; } }
+.entry-list li.entry-full{display:block}
+.entry-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem}
+.entry-body{overflow-wrap:anywhere}
+.entry-body p{margin:.3rem 0}
 </style>
 </head>
 <body>
@@ -271,6 +275,27 @@ function esc(v) {
     return String(v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// Дозволяє лише теги форматування Quill; решту прибирає
+function sanitizeHtml(html) {
+    const allowed = new Set(['P','BR','STRONG','B','EM','I','U','S','OL','UL','LI','H1','H2','H3','BLOCKQUOTE']);
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    (function clean(node) {
+        [...node.childNodes].forEach(ch => {
+            if (ch.nodeType === 1) {
+                if (!allowed.has(ch.tagName)) {
+                    ch.replaceWith(document.createTextNode(ch.textContent));
+                    return;
+                }
+                [...ch.attributes].forEach(a => ch.removeAttribute(a.name));
+                clean(ch);
+            } else if (ch.nodeType !== 3) {
+                ch.remove();
+            }
+        });
+    })(doc.body);
+    return doc.body.innerHTML;
+}
+
 async function loadEntries() {
     const list = document.getElementById('entryList');
     if (!list) return;
@@ -280,17 +305,20 @@ async function loadEntries() {
             list.innerHTML = '<li><i>Записів ще немає</i></li>';
             return;
         }
-        const titles = await Promise.all(entries.map(async e => {
-            try { return JSON.parse(await decryptData(diaryKey, e.iv, e.ciphertext)).title || '(без заголовка)'; }
-            catch { return '🔒 не вдалося розшифрувати'; }
+        const bodies = await Promise.all(entries.map(async e => {
+            try { return sanitizeHtml(JSON.parse(await decryptData(diaryKey, e.iv, e.ciphertext)).content || ''); }
+            catch { return '<i>🔒 не вдалося розшифрувати</i>'; }
         }));
         list.innerHTML = entries.map((e, i) => `
-          <li>
-            <span><b>${esc(titles[i])}</b><br><small>${esc(e.created_at)}</small></span>
-            <div>
-              <button onclick="editEntry(${e.id})">✏️</button>
-              <button class="danger" onclick="deleteEntry(${e.id})">🗑️</button>
+          <li class="entry-full">
+            <div class="entry-head">
+              <small>${esc(e.created_at)}</small>
+              <div>
+                <button onclick="editEntry(${e.id})">✏️</button>
+                <button class="danger" onclick="deleteEntry(${e.id})">🗑️</button>
+              </div>
             </div>
+            <div class="entry-body">${bodies[i]}</div>
           </li>`).join('');
     } catch (e) { alert(e.message); }
 }
